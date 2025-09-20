@@ -1,0 +1,417 @@
+// === SISTEMA DE ETIQUETAS TÉRMICAS - VERSIÓN LIMPIA ===
+const SPREADSHEET_ID = '1RPQq5mYlNYA35kbZ32-Wg1HDuJqFvm-UNMzYCFSXyLk';
+const SHEET_NAME_ETIQUETAS = 'Etiquetas';
+const SHEET_NAME_SUBETIQUETAS = 'Subetiquetas';
+
+const API_CONFIG = {
+  qr: {
+    baseUrl: 'https://api.qrserver.com/v1/create-qr-code/',
+    defaultSize: '150x150'
+  },
+  barcode: {
+    baseUrl: 'https://barcode.tec-it.com/barcode.ashx?',
+    defaultFormat: 'Code128',
+    dpi: 96,
+    scaleFactor: 1
+  }
+};
+
+const CAMPOS = {
+  TEXTO1_CODIGO: 'Texto1Código',
+  TEXTO2_INICIO: 'Texto2Inicio',
+  TEXTO3_MEDIO: 'Texto3Medio',
+  TEXTO4_FINAL: 'Texto4Final',
+  TEXTO5_INFERIOR: 'Texto5inferior',
+  TEXTO6: 'Texto6'
+};
+
+class EtiquetaGenerator {
+  constructor() {
+    this.debugMode = false;
+  }
+
+  isEmptyText(text) {
+    return !text || String(text).trim() === '' || String(text) === 'undefined' || String(text) === 'null';
+  }
+
+  generateLabel(data) {
+    console.log('Generando etiqueta para ID:', data.EtiquetasID);
+    
+    const textoParaCodigo = data[CAMPOS.TEXTO1_CODIGO] || '';
+    
+    console.log('=== CAMPOS RECIBIDOS ===');
+    console.log('Texto1Código:', data[CAMPOS.TEXTO1_CODIGO]);
+    console.log('Texto2Inicio:', data[CAMPOS.TEXTO2_INICIO]);
+    console.log('Texto3Medio:', data[CAMPOS.TEXTO3_MEDIO]);
+    console.log('Subtipo2:', data.Subtipo2);
+    console.log('Subtipo3:', data.Subtipo3);
+    
+    const textos = {
+      texto2: this.procesarTexto(data[CAMPOS.TEXTO2_INICIO], data.Subtipo2),
+      texto3: this.procesarTexto(data[CAMPOS.TEXTO3_MEDIO], data.Subtipo3),
+      texto4: data[CAMPOS.TEXTO4_FINAL] || '',
+      texto5: data[CAMPOS.TEXTO5_INFERIOR] || '',
+      texto6: data[CAMPOS.TEXTO6] || ''
+    };
+
+    console.log('Textos procesados:', textos);
+
+    const elementoCentral = data.ElementoCentral === true || String(data.ElementoCentral).toLowerCase() === 'true';
+    const codigoOpciones = String(data.CódigoOpciones || '').toLowerCase();
+    const codigoTamaño = String(data.CódigoTamaño || '').toLowerCase();
+    
+    let codigoHtml = '';
+    if (codigoOpciones !== 'sincódigo' && !this.isEmptyText(textoParaCodigo)) {
+      const contenidoProcesado = this.procesarContenidoCodigo(textoParaCodigo, data['Tipo 1 a Código']);
+      
+      if (codigoOpciones === 'qr') {
+        codigoHtml = this.generateQRCode(contenidoProcesado);
+      } else if (codigoOpciones === 'barra') {
+        codigoHtml = this.generateBarcode(contenidoProcesado);
+      }
+    }
+
+    if (!elementoCentral) {
+      return this.createSimpleLayout(codigoOpciones, codigoHtml, textoParaCodigo, textos);
+    } else {
+      return this.createMixedLayout(codigoOpciones, codigoTamaño, codigoHtml, textos);
+    }
+  }
+
+  procesarTexto(texto, subtipo) {
+    if (this.isEmptyText(texto)) return '';
+    
+    const textoLimpio = String(texto).trim();
+    
+    if (subtipo === 'Precio$' || this.esNumerico(textoLimpio)) {
+      const precio = textoLimpio.replace(/[$\s]/g, '');
+      return '$' + precio;
+    }
+    return textoLimpio;
+  }
+
+  esNumerico(texto) {
+    const limpio = texto.replace(/[$\s,]/g, '');
+    return /^\d+(\.\d{1,2})?$/.test(limpio);
+  }
+
+  procesarContenidoCodigo(texto, tipo) {
+    switch (tipo) {
+      case 'URL':
+        return texto.startsWith('http') ? texto : 'https://' + texto;
+      case 'Teléfono':
+        const tel = texto.replace(/[^0-9+]/g, '');
+        return 'tel:' + tel;
+      case 'Email':
+        return 'mailto:' + texto;
+      case 'Whatsapp':
+        const whatsapp = texto.replace(/[^0-9]/g, '');
+        return 'https://wa.me/' + whatsapp;
+      case 'LatLong':
+        return 'https://www.google.com/maps?q=' + texto;
+      case 'DirecciónMaps':
+        return 'https://www.google.com/maps/search/?api=1&query=' + encodeURIComponent(texto);
+      default:
+        return texto;
+    }
+  }
+
+  createSimpleLayout(codigoOpciones, codigoHtml, textoParaCodigo, textos) {
+    if (codigoOpciones === 'sincódigo') {
+      const textoMostrar = this.findFirstText(textoParaCodigo, textos);
+      return this.createTextOnlyLayout(textoMostrar);
+    } else {
+      return this.createSingleCodeLayout(codigoHtml, textos.texto5);
+    }
+  }
+
+  createMixedLayout(codigoOpciones, codigoTamaño, codigoHtml, textos) {
+    if (codigoOpciones === 'sincódigo') {
+      return this.createMultiTextLayout(textos);
+    }
+
+    if (codigoOpciones === 'barra') {
+      return this.createBarraLayout(codigoTamaño, codigoHtml, textos);
+    } else if (codigoOpciones === 'qr') {
+      return this.createQRLayout(codigoTamaño, codigoHtml, textos);
+    }
+
+    return this.createTextOnlyLayout('Error de configuración');
+  }
+
+  createBarraLayout(tamaño, codigoHtml, textos) {
+    const textoCompleto = this.combinarTextos(textos.texto2, textos.texto3, textos.texto4);
+    
+    if (tamaño === 'chico') {
+      return '<div style="width: 250px; height: 200px; border: 2px solid #000; background: white; display: grid; grid-template-rows: 1fr 1fr; padding: 5px; box-sizing: border-box; gap: 3px;">' +
+        '<div style="display: flex; align-items: center; justify-content: center; font-weight: bold; font-size: 16px; text-align: center; padding: 5px;">' +
+        this.sanitizeText(textoCompleto) +
+        '</div>' +
+        '<div style="display: flex; align-items: center; justify-content: flex-end; padding-right: 15px;">' +
+        codigoHtml +
+        '</div>' +
+        '</div>';
+    } else {
+      return '<div style="width: 250px; height: 200px; border: 2px solid #000; background: white; display: grid; grid-template-rows: 1fr 1fr; padding: 5px; box-sizing: border-box; gap: 3px;">' +
+        '<div style="display: flex; align-items: center; justify-content: center; font-weight: bold; font-size: 16px; text-align: center; padding: 5px;">' +
+        this.sanitizeText(textoCompleto) +
+        '</div>' +
+        '<div style="display: flex; align-items: center; justify-content: center;">' +
+        codigoHtml +
+        '</div>' +
+        '</div>';
+    }
+  }
+
+  createQRLayout(tamaño, codigoHtml, textos) {
+    const textoCompleto = this.combinarTextos(textos.texto2, textos.texto3, textos.texto4);
+    
+    if (tamaño === 'chico') {
+      return '<div style="width: 250px; height: 200px; border: 2px solid #000; background: white; display: grid; grid-template-columns: 80px 1fr; padding: 5px; box-sizing: border-box; gap: 5px;">' +
+        '<div style="display: flex; align-items: center; justify-content: center;">' +
+        codigoHtml +
+        '</div>' +
+        '<div style="display: flex; align-items: center; justify-content: center; font-weight: bold; font-size: 14px; text-align: center; padding: 5px;">' +
+        this.sanitizeText(textoCompleto) +
+        '</div>' +
+        '</div>';
+    } else {
+      return '<div style="width: 250px; height: 200px; border: 2px solid #000; background: white; display: grid; grid-template-columns: 1fr 1fr; padding: 5px; box-sizing: border-box; gap: 5px;">' +
+        '<div style="display: flex; align-items: center; justify-content: center;">' +
+        codigoHtml +
+        '</div>' +
+        '<div style="display: flex; align-items: center; justify-content: center; font-weight: bold; font-size: 14px; text-align: center; padding: 5px;">' +
+        this.sanitizeText(textoCompleto) +
+        '</div>' +
+        '</div>';
+    }
+  }
+
+  createMultiTextLayout(textos) {
+    const textosDisponibles = [
+      textos.texto2, textos.texto3, textos.texto4, textos.texto5, textos.texto6
+    ].filter(t => !this.isEmptyText(t));
+
+    if (textosDisponibles.length >= 4) {
+      return '<div style="width: 250px; height: 200px; border: 2px solid #000; background: white; display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr; gap: 2px; padding: 5px; box-sizing: border-box;">' +
+        textosDisponibles.slice(0, 4).map(t => '<div style="display: flex; align-items: center; justify-content: center; font-weight: bold; font-size: 12px; text-align: center; padding: 3px;">' + this.sanitizeText(t) + '</div>').join('') +
+        '</div>';
+    } else if (textosDisponibles.length >= 2) {
+      return '<div style="width: 250px; height: 200px; border: 2px solid #000; background: white; display: grid; grid-template-columns: 1fr 1fr; gap: 2px; padding: 5px; box-sizing: border-box;">' +
+        textosDisponibles.slice(0, 2).map(t => '<div style="display: flex; align-items: center; justify-content: center; font-weight: bold; font-size: 14px; text-align: center; padding: 5px;">' + this.sanitizeText(t) + '</div>').join('') +
+        '</div>';
+    } else {
+      return this.createTextOnlyLayout(textosDisponibles[0] || 'Sin texto');
+    }
+  }
+
+  createTextOnlyLayout(texto) {
+    if (this.isEmptyText(texto)) {
+      return this.createErrorLayout('Sin texto disponible');
+    }
+
+    return '<div style="width: 250px; height: 200px; border: 2px solid #000; display: flex; align-items: center; justify-content: center; font-weight: bold; font-size: 20px; text-align: center; background: white; padding: 15px; box-sizing: border-box; line-height: 1.3; word-wrap: break-word;">' +
+      this.sanitizeText(texto) +
+      '</div>';
+  }
+
+  createSingleCodeLayout(codigoHtml, textoInferior) {
+    if (this.isEmptyText(codigoHtml)) {
+      return this.createErrorLayout('No se pudo generar el código');
+    }
+
+    let overlayHtml = '';
+    if (!this.isEmptyText(textoInferior)) {
+      overlayHtml = '<div style="position: absolute; bottom: 8px; left: 50%; transform: translateX(-50%); background: rgba(255,255,255,0.95); padding: 4px 8px; border-radius: 3px; font-size: 11px; font-weight: bold; border: 1px solid #ddd;">' +
+        this.sanitizeText(textoInferior) +
+        '</div>';
+    }
+
+    return '<div style="width: 250px; height: 200px; border: 2px solid #000; display: flex; align-items: center; justify-content: center; background: white; position: relative; padding: 10px; box-sizing: border-box;">' +
+      codigoHtml +
+      overlayHtml +
+      '</div>';
+  }
+
+  findFirstText(textoParaCodigo, textos) {
+    const candidatos = [textoParaCodigo, textos.texto2, textos.texto3, textos.texto4, textos.texto5, textos.texto6];
+    return candidatos.find(t => !this.isEmptyText(t)) || 'Sin texto';
+  }
+
+  combinarTextos() {
+    const args = Array.prototype.slice.call(arguments);
+    return args.filter(t => !this.isEmptyText(t)).join(' ');
+  }
+
+  generateQRCode(text) {
+    if (this.isEmptyText(text)) return '';
+    const encodedText = encodeURIComponent(text);
+    return '<img src="' + API_CONFIG.qr.baseUrl + '?size=' + API_CONFIG.qr.defaultSize + '&data=' + encodedText + '" alt="QR" style="max-width: 100%; max-height: 100%; height: auto;">';
+  }
+
+  generateBarcode(text) {
+    if (this.isEmptyText(text)) return '';
+    const encodedText = encodeURIComponent(text);
+    return '<img src="' + API_CONFIG.barcode.baseUrl + 'data=' + encodedText + '&code=' + API_CONFIG.barcode.defaultFormat + '" alt="Barcode" style="max-width: 100%; max-height: 100%; height: auto;">';
+  }
+
+  createErrorLayout(message) {
+    return '<div style="width: 250px; height: 200px; border: 2px solid #ff6b6b; background: #ffe6e6; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 15px; box-sizing: border-box; text-align: center;">' +
+      '<div style="font-size: 16px; font-weight: bold; color: #d63031; margin-bottom: 8px;">ERROR</div>' +
+      '<div style="font-size: 12px; color: #d63031; line-height: 1.3;">' + message + '</div>' +
+      '</div>';
+  }
+
+  sanitizeText(text) {
+    if (this.isEmptyText(text)) return '';
+    return String(text)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+}
+
+function doGet(e) {
+  try {
+    const etiquetasId = e && e.parameter ? e.parameter.etiquetasId : null;
+    
+    if (!etiquetasId) {
+      return createErrorResponse('Parámetro etiquetasId requerido en la URL: ?etiquetasId=TU_ID');
+    }
+
+    console.log('Procesando EtiquetasID:', etiquetasId);
+
+    const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+    const sheetEtiquetas = ss.getSheetByName(SHEET_NAME_ETIQUETAS);
+
+    if (!sheetEtiquetas) {
+      return createErrorResponse('Hoja "' + SHEET_NAME_ETIQUETAS + '" no encontrada');
+    }
+
+    const etiquetasData = sheetEtiquetas.getDataRange().getValues();
+    const headersEtiquetas = etiquetasData[0];
+    
+    const rowIndex = etiquetasData.findIndex(row => 
+      String(row[headersEtiquetas.indexOf('EtiquetasID')]) === String(etiquetasId)
+    );
+
+    if (rowIndex === -1) {
+      return createErrorResponse('Etiqueta no encontrada: ' + etiquetasId);
+    }
+
+    const etiquetaPadre = {};
+    headersEtiquetas.forEach(function(header, i) {
+      etiquetaPadre[header] = etiquetasData[rowIndex][i];
+    });
+
+    const puedeImprimir = etiquetaPadre.Imprimir === true || 
+                         String(etiquetaPadre.Imprimir).toLowerCase() === 'true';
+
+    if (!puedeImprimir) {
+      return createErrorResponse('Etiqueta no marcada para imprimir (Imprimir = TRUE)');
+    }
+
+    const generator = new EtiquetaGenerator();
+    const cantidadPadre = parseInt(etiquetaPadre.Cantidad) || 1;
+    let allLabelsHtml = '';
+
+    for (let i = 0; i < cantidadPadre; i++) {
+      try {
+        allLabelsHtml += generator.generateLabel(etiquetaPadre);
+      } catch (error) {
+        console.error('Error generando etiqueta ' + (i + 1) + ':', error);
+        allLabelsHtml += generator.createErrorLayout('Error: ' + error.message);
+      }
+    }
+
+    try {
+      const sheetSubetiquetas = ss.getSheetByName(SHEET_NAME_SUBETIQUETAS);
+      if (sheetSubetiquetas) {
+        const subetiquetas = obtenerSubetiquetas(sheetSubetiquetas, etiquetasId);
+        
+        subetiquetas.forEach(function(subetiqueta) {
+          const puedeImprimirSub = subetiqueta.Imprimir === true || 
+                                  String(subetiqueta.Imprimir).toLowerCase() === 'true';
+          
+          if (puedeImprimirSub) {
+            const cantidadSub = parseInt(subetiqueta.Cantidad) || 1;
+            const etiquetaCombinada = fusionarDatosEtiqueta(etiquetaPadre, subetiqueta);
+            
+            for (let i = 0; i < cantidadSub; i++) {
+              try {
+                allLabelsHtml += generator.generateLabel(etiquetaCombinada);
+              } catch (error) {
+                console.error('Error generando subetiqueta:', error);
+                allLabelsHtml += generator.createErrorLayout('Error en subetiqueta: ' + error.message);
+              }
+            }
+          }
+        });
+      }
+    } catch (error) {
+      console.log('No se pudieron procesar subetiquetas:', error.message);
+    }
+
+    const htmlContent = createPrintHTML(allLabelsHtml, etiquetasId);
+    return HtmlService.createHtmlOutput(htmlContent)
+      .setTitle('Etiquetas - ' + etiquetasId)
+      .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
+
+  } catch (error) {
+    console.error('Error en doGet:', error);
+    return createErrorResponse('Error interno: ' + error.message);
+  }
+}
+
+function obtenerSubetiquetas(sheet, etiquetasId) {
+  const data = sheet.getDataRange().getValues();
+  const headers = data[0];
+  const subetiquetas = [];
+
+  for (let i = 1; i < data.length; i++) {
+    const row = data[i];
+    const etiquetaIdIndex = headers.indexOf('EtiquetasID');
+    
+    if (etiquetaIdIndex >= 0 && String(row[etiquetaIdIndex]) === String(etiquetasId)) {
+      const subetiqueta = {};
+      headers.forEach(function(header, j) {
+        subetiqueta[header] = row[j];
+      });
+      subetiquetas.push(subetiqueta);
+    }
+  }
+
+  return subetiquetas;
+}
+
+function fusionarDatosEtiqueta(padre, hijo) {
+  const etiquetaCombinada = {};
+  Object.keys(padre).forEach(function(key) {
+    etiquetaCombinada[key] = padre[key];
+  });
+
+  const camposContenido = [
+    CAMPOS.TEXTO1_CODIGO, CAMPOS.TEXTO2_INICIO, CAMPOS.TEXTO3_MEDIO,
+    CAMPOS.TEXTO4_FINAL, CAMPOS.TEXTO5_INFERIOR, CAMPOS.TEXTO6,
+    'CódigoOpciones', 'CódigoTamaño', 'ElementoCentral',
+    'Tipo 1 a Código', 'Subtipo2', 'Subtipo3'
+  ];
+
+  camposContenido.forEach(function(campo) {
+    if (hijo[campo] !== undefined && hijo[campo] !== null && String(hijo[campo]).trim() !== '') {
+      etiquetaCombinada[campo] = hijo[campo];
+    }
+  });
+
+  return etiquetaCombinada;
+}
+
+function createPrintHTML(labelsHtml, etiquetasId) {
+  return '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Imprimiendo Etiquetas - ' + etiquetasId + '</title><style>body{font-family:Arial,sans-serif;margin:0;padding:20px;background:white}.labels-container{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:10px;justify-items:center}.no-print{text-align:center;margin-bottom:20px;padding:10px;background:#e3f2fd;border-radius:5px}@media print{.no-print{display:none}body{padding:0;margin:0}.labels-container{display:block;page-break-inside:avoid}.labels-container>div{page-break-inside:avoid;margin-bottom:10px}}</style></head><body><div class="no-print"><h2>Etiquetas Térmicas - ' + etiquetasId + '</h2><p>Preparando impresión automática...</p><button onclick="window.print()" style="background:#4CAF50;color:white;padding:10px 20px;border:none;border-radius:4px;cursor:pointer;font-size:16px">Imprimir Ahora</button></div><div class="labels-container">' + labelsHtml + '</div><script>window.addEventListener("load",function(){setTimeout(function(){window.print()},1000)});window.addEventListener("afterprint",function(){console.log("Impresión completada")});</script></body></html>';
+}
+
+function createErrorResponse(message) {
+  return HtmlService.createHtmlOutput('<div style="font-family:Arial;padding:40px;text-align:center;max-width:500px;margin:50px auto;background:#ffe6e6;border:2px solid #ff6b6b;border-radius:8px"><h2 style="color:#d32f2f;margin-top:0">Error del Sistema</h2><p style="font-size:16px;margin:20px 0">' + message + '</p><div style="background:#f5f5f5;padding:15px;border-radius:5px;margin-top:20px;text-align:left"><strong>Configuración requerida:</strong><br>• Solo <code>Texto1Código</code> se convierte en código QR/barra<br>• Los demás campos son siempre texto<br>• <code>Imprimir = TRUE</code> obligatorio<br>• <code>ElementoCentral = true/false</code><br>• <code>CódigoOpciones = QR/Barra/SinCódigo</code></div></div>');
+}
